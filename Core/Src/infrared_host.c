@@ -12,11 +12,6 @@ IR_Host_Context_t ir_host_context = {
     .last_tx_time = 0
 };
 
-static void IR_Host_TxCompleteCallback(void)
-{
-    tx_complete_flag = true;
-}
-
 void IR_Host_Init(void)
 {
     ir_host_context.status = IR_HOST_STATUS_IDLE;
@@ -43,39 +38,40 @@ uint8_t IR_Host_CRC8(uint8_t *data, uint8_t length)
     return crc;
 }
 
-static bool IR_Host_TransmitFrame(uint32_t can_id, uint8_t *data, uint8_t length)
+void IR_Host_ConfigCanFilter(void)
 {
-    CAN_TxHeaderTypeDef tx_header;
-    uint32_t tx_mailbox;
-    uint8_t tx_data[8];
+    CAN_FilterTypeDef can_filter;
 
-    if (length > 8) {
-        return false;
+    can_filter.FilterBank = 0;
+    can_filter.FilterMode = CAN_FILTERMODE_IDMASK;
+    can_filter.FilterScale = CAN_FILTERSCALE_32BIT;
+    can_filter.FilterIdHigh = 0x0000;
+    can_filter.FilterIdLow = 0x0000;
+    can_filter.FilterMaskIdHigh = 0x0000;
+    can_filter.FilterMaskIdLow = 0x0000;
+    can_filter.FilterFIFOAssignment = CAN_RX_FIFO0;
+    can_filter.FilterActivation = ENABLE;
+    can_filter.SlaveStartFilterBank = 14;
+
+    if (HAL_CAN_ConfigFilter(&hcan1, &can_filter) != HAL_OK) {
+        Error_Handler();
+    }
+}
+
+void IR_Host_StartCan(void)
+{
+    IR_Host_ConfigCanFilter();
+
+    if (HAL_CAN_Start(&hcan1) != HAL_OK) {
+        Error_Handler();
     }
 
-    memcpy(tx_data, data, length);
-
-    tx_header.StdId = can_id;
-    tx_header.ExtId = 0;
-    tx_header.IDE = CAN_ID_STD;
-    tx_header.RTR = CAN_RTR_DATA;
-    tx_header.DLC = length;
-    tx_header.TransmitGlobalTime = DISABLE;
-
-    tx_complete_flag = false;
-
-    if (HAL_CAN_AddTxMessage(&hcan1, &tx_header, tx_data, &tx_mailbox) != HAL_OK) {
-        return false;
+    if (HAL_CAN_ActivateNotification(&hcan1, CAN_IT_TX_MAILBOX_EMPTY |
+                                              CAN_IT_RX_FIFO0_MSG_PENDING |
+                                              CAN_IT_RX_FIFO0_FULL |
+                                              CAN_IT_RX_FIFO0_OVERRUN) != HAL_OK) {
+        Error_Handler();
     }
-
-    uint32_t start_time = HAL_GetTick();
-    while (!tx_complete_flag) {
-        if ((HAL_GetTick() - start_time) > 100) {
-            return false;
-        }
-    }
-
-    return true;
 }
 
 bool IR_Host_SendCommand(IR_Host_Command_t cmd, uint8_t *data, uint8_t length)
@@ -83,8 +79,9 @@ bool IR_Host_SendCommand(IR_Host_Command_t cmd, uint8_t *data, uint8_t length)
     CAN_TxHeaderTypeDef tx_header;
     uint32_t tx_mailbox;
     uint8_t tx_data[8];
+    uint8_t crc_len;
 
-    if (length > 6) {
+    if (length > 5) {
         return false;
     }
 
@@ -97,22 +94,25 @@ bool IR_Host_SendCommand(IR_Host_Command_t cmd, uint8_t *data, uint8_t length)
         return false;
     }
 
+    memset(tx_data, 0, 8);
     tx_data[0] = IR_HOST_MODULE_ID;
     tx_data[1] = cmd;
     if (data != NULL && length > 0) {
         memcpy(&tx_data[2], data, length);
     }
-    tx_data[7] = IR_Host_CRC8(tx_data, 7);
+    crc_len = 2 + length;
+    tx_data[crc_len] = IR_Host_CRC8(tx_data, crc_len);
 
     tx_header.StdId = IR_HOST_CAN_ID_COMMAND;
     tx_header.ExtId = 0;
     tx_header.IDE = CAN_ID_STD;
     tx_header.RTR = CAN_RTR_DATA;
-    tx_header.DLC = 8;
+    tx_header.DLC = crc_len + 1;
     tx_header.TransmitGlobalTime = DISABLE;
 
     ir_host_context.busy = true;
     ir_host_context.status = IR_HOST_STATUS_SENDING;
+    tx_complete_flag = false;
 
     if (HAL_CAN_AddTxMessage(&hcan1, &tx_header, tx_data, &tx_mailbox) != HAL_OK) {
         ir_host_context.busy = false;
@@ -128,7 +128,12 @@ bool IR_Host_SendCommand(IR_Host_Command_t cmd, uint8_t *data, uint8_t length)
 
 bool IR_Host_SendDataWithRetry(uint8_t *data, uint8_t length, uint8_t max_retry)
 {
-    if (length > 8) {
+    CAN_TxHeaderTypeDef tx_header;
+    uint32_t tx_mailbox;
+    uint8_t tx_data[8];
+    uint8_t total_len;
+
+    if (length > 6) {
         return false;
     }
 
@@ -139,23 +144,23 @@ bool IR_Host_SendDataWithRetry(uint8_t *data, uint8_t length, uint8_t max_retry)
 
         ir_host_context.status = IR_HOST_STATUS_IDLE;
 
-        CAN_TxHeaderTypeDef tx_header;
-        uint32_t tx_mailbox;
-        uint8_t tx_data[9];
-
+        memset(tx_data, 0, 8);
         tx_data[0] = IR_HOST_MODULE_ID;
         memcpy(&tx_data[1], data, length);
-        tx_data[length + 1] = IR_Host_CRC8(tx_data, length + 1);
+        total_len = length + 1;
+        tx_data[total_len] = IR_Host_CRC8(tx_data, total_len);
+        total_len++;
 
         tx_header.StdId = IR_HOST_CAN_ID_DATA;
         tx_header.ExtId = 0;
         tx_header.IDE = CAN_ID_STD;
         tx_header.RTR = CAN_RTR_DATA;
-        tx_header.DLC = length + 2;
+        tx_header.DLC = total_len;
         tx_header.TransmitGlobalTime = DISABLE;
 
         ir_host_context.busy = true;
         ir_host_context.status = IR_HOST_STATUS_SENDING;
+        tx_complete_flag = false;
 
         if (HAL_CAN_AddTxMessage(&hcan1, &tx_header, tx_data, &tx_mailbox) == HAL_OK) {
             ir_host_context.last_tx_time = HAL_GetTick();
@@ -191,29 +196,36 @@ IR_Host_Status_t IR_Host_GetStatus(void)
 void IR_Host_ProcessRxFrame(CAN_RxHeaderTypeDef *rx_header, uint8_t *rx_data)
 {
     if (rx_header->StdId == IR_HOST_CAN_ID_ACK) {
-        if (rx_data[0] == IR_ACK_MAGIC && rx_data[1] == IR_ACK_MAGIC) {
-            ir_host_context.last_response.status = IR_HOST_STATUS_SUCCESS;
-        } else if (rx_data[0] == IR_NACK_MAGIC && rx_data[1] == IR_NACK_MAGIC) {
-            ir_host_context.last_response.status = IR_HOST_STATUS_NACK;
+        if (rx_header->DLC >= 2) {
+            if (rx_data[0] == IR_ACK_MAGIC && rx_data[1] == IR_ACK_MAGIC) {
+                ir_host_context.last_response.status = IR_HOST_STATUS_SUCCESS;
+            } else if (rx_data[0] == IR_NACK_MAGIC && rx_data[1] == IR_NACK_MAGIC) {
+                ir_host_context.last_response.status = IR_HOST_STATUS_NACK;
+            }
+            rx_received_flag = true;
         }
-        rx_received_flag = true;
         return;
     }
 
     if (rx_header->StdId == IR_HOST_CAN_ID_DATA) {
-        uint8_t module_id = rx_data[0];
-        uint8_t received_crc = rx_data[rx_header->DLC - 1];
-        uint8_t calculated_crc = IR_Host_CRC8(rx_data, rx_header->DLC - 1);
+        if (rx_header->DLC >= 2) {
+            uint8_t module_id = rx_data[0];
+            uint8_t received_crc = rx_data[rx_header->DLC - 1];
+            uint8_t calculated_crc = IR_Host_CRC8(rx_data, rx_header->DLC - 1);
 
-        if (received_crc == calculated_crc) {
-            ir_host_context.last_response.module_id = module_id;
-            ir_host_context.last_response.status = IR_HOST_STATUS_SUCCESS;
-            ir_host_context.last_response.length = rx_header->DLC - 2;
-            memcpy(ir_host_context.last_response.data, &rx_data[1], rx_header->DLC - 2);
-        } else {
-            ir_host_context.last_response.status = IR_HOST_STATUS_ERROR;
+            if (received_crc == calculated_crc) {
+                ir_host_context.last_response.module_id = module_id;
+                ir_host_context.last_response.status = IR_HOST_STATUS_SUCCESS;
+                ir_host_context.last_response.length = rx_header->DLC - 2;
+                if (ir_host_context.last_response.length > 0) {
+                    memcpy(ir_host_context.last_response.data, &rx_data[1], 
+                           ir_host_context.last_response.length);
+                }
+            } else {
+                ir_host_context.last_response.status = IR_HOST_STATUS_ERROR;
+            }
+            rx_received_flag = true;
         }
-        rx_received_flag = true;
     }
 }
 

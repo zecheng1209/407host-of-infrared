@@ -1,3 +1,5 @@
+//在本文件中包含infrared.c中的函数没有使用，仅作为上位机开发的参考
+
 //红外模块实现  具有解析can数据帧、ack确认、crc校验、超时重传等功能
 #include "infrared.h"
 #include "stm32f1xx_hal.h"

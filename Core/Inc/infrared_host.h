@@ -65,7 +65,15 @@ IR_Host_Status_t IR_Host_GetStatus(void);
 void IR_Host_ProcessRxFrame(CAN_RxHeaderTypeDef *rx_header, uint8_t *rx_data);
 bool IR_Host_WaitResponse(uint32_t timeout_ms);
 void IR_Host_ClearStatus(void);
-
 uint8_t IR_Host_CRC8(uint8_t *data, uint8_t length);
+
+bool IR_Host_Ping(uint32_t timeout_ms);
+bool IR_Host_ReadStatus(uint8_t *status, uint32_t timeout_ms);
+bool IR_Host_ResetModule(uint32_t timeout_ms);
+
+void IR_Host_ConfigCanFilter(void);
+void IR_Host_StartCan(void);
+void IR_Host_TxMailboxCompleteCallback(CAN_HandleTypeDef *hcan);
+void IR_Host_RxFifo0Callback(CAN_HandleTypeDef *hcan);
 
 #endif
