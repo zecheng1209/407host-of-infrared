@@ -3,23 +3,133 @@
 
 extern CAN_HandleTypeDef hcan1;
 
-static volatile bool tx_complete_flag = false;
-static volatile bool rx_received_flag = false;
+IR_Host_Context_t ir_host_context = {0};
 
-IR_Host_Context_t ir_host_context = {
-    .status = IR_HOST_STATUS_IDLE,
-    .busy = false,
-    .last_tx_time = 0
+static osThreadId_t ir_host_task_handle = NULL;
+static const osThreadAttr_t ir_host_task_attr = {
+    .name = "IRHostTask",
+    .stack_size = 1024 * 4,
+    .priority = (osPriority_t)osPriorityNormal,
 };
 
 void IR_Host_Init(void)
 {
-    ir_host_context.status = IR_HOST_STATUS_IDLE;
-    ir_host_context.busy = false;
-    ir_host_context.last_tx_time = 0;
-    memset(&ir_host_context.last_response, 0, sizeof(IR_Host_ResponseFrame_t));
-    tx_complete_flag = false;
-    rx_received_flag = false;
+    ir_host_context.rx_queue = osMessageQueueNew(IR_HOST_RX_QUEUE_SIZE, sizeof(IR_Host_RxFrame_t), NULL);
+    ir_host_context.module_list.head = NULL;
+    ir_host_context.module_list.count = 0;
+    ir_host_context.module_list.mutex = osMutexNew(NULL);
+    ir_host_context.initialized = true;
+
+    IR_Host_AddModule(0x01);
+
+    IR_Module_Node_t *module = IR_Host_FindModule(0x01);
+    if (module != NULL) {
+        module->last_tx_time = HAL_GetTick() - IR_HOST_FRAME_INTERVAL_MS - 1;
+    }
+}
+
+void IR_Host_StartTask(void)
+{
+    if (ir_host_task_handle == NULL) {
+        ir_host_task_handle = osThreadNew(IR_Host_Task, NULL, &ir_host_task_attr);
+    }
+}
+
+bool IR_Host_AddModule(uint8_t module_id)
+{
+    if (!ir_host_context.initialized) return false;
+    if (ir_host_context.module_list.count >= IR_HOST_MAX_MODULES) return false;
+
+    osAcquire(ir_host_context.module_list.mutex);
+
+    IR_Module_Node_t *current = ir_host_context.module_list.head;
+    while (current != NULL) {
+        if (current->module_id == module_id) {
+            osRelease(ir_host_context.module_list.mutex);
+            return false;
+        }
+        current = current->next;
+    }
+
+    IR_Module_Node_t *new_node = (IR_Module_Node_t *)pvPortMalloc(sizeof(IR_Module_Node_t));
+    if (new_node == NULL) {
+        osRelease(ir_host_context.module_list.mutex);
+        return false;
+    }
+
+    new_node->module_id = module_id;
+    new_node->status = IR_HOST_STATUS_IDLE;
+    new_node->online = false;
+    new_node->busy = false;
+    new_node->last_rx_time = 0;
+    new_node->last_tx_time = 0;
+    memset(&new_node->last_response, 0, sizeof(IR_Host_ResponseFrame_t));
+    new_node->next = ir_host_context.module_list.head;
+    ir_host_context.module_list.head = new_node;
+    ir_host_context.module_list.count++;
+
+    osRelease(ir_host_context.module_list.mutex);
+    return true;
+}
+
+bool IR_Host_RemoveModule(uint8_t module_id)
+{
+    if (!ir_host_context.initialized) return false;
+
+    osAcquire(ir_host_context.module_list.mutex);
+
+    IR_Module_Node_t **current = &ir_host_context.module_list.head;
+    while (*current != NULL) {
+        if ((*current)->module_id == module_id) {
+            IR_Module_Node_t *to_remove = *current;
+            *current = (*current)->next;
+            vPortFree(to_remove);
+            ir_host_context.module_list.count--;
+            osRelease(ir_host_context.module_list.mutex);
+            return true;
+        }
+        current = &(*current)->next;
+    }
+
+    osRelease(ir_host_context.module_list.mutex);
+    return false;
+}
+
+IR_Module_Node_t* IR_Host_FindModule(uint8_t module_id)
+{
+    if (!ir_host_context.initialized) return NULL;
+
+    IR_Module_Node_t *current = ir_host_context.module_list.head;
+    while (current != NULL) {
+        if (current->module_id == module_id) {
+            return current;
+        }
+        current = current->next;
+    }
+    return NULL;
+}
+
+IR_Module_Node_t* IR_Host_GetModuleByIndex(uint8_t index)
+{
+    if (!ir_host_context.initialized || index >= ir_host_context.module_list.count) return NULL;
+
+    IR_Module_Node_t *current = ir_host_context.module_list.head;
+    for (uint8_t i = 0; i < index && current != NULL; i++) {
+        current = current->next;
+    }
+    return current;
+}
+
+uint8_t IR_Host_GetModuleCount(void)
+{
+    return ir_host_context.module_list.count;
+}
+
+bool IR_Host_IsModuleOnline(uint8_t module_id)
+{
+    IR_Module_Node_t *module = IR_Host_FindModule(module_id);
+    if (module == NULL) return false;
+    return module->online;
 }
 
 uint8_t IR_Host_CRC8(uint8_t *data, uint8_t length)
@@ -53,49 +163,117 @@ void IR_Host_ConfigCanFilter(void)
     can_filter.FilterActivation = ENABLE;
     can_filter.SlaveStartFilterBank = 14;
 
-    if (HAL_CAN_ConfigFilter(&hcan1, &can_filter) != HAL_OK) {
-        Error_Handler();
-    }
+    HAL_CAN_ConfigFilter(&hcan1, &can_filter);
 }
 
 void IR_Host_StartCan(void)
 {
     IR_Host_ConfigCanFilter();
+    HAL_CAN_Start(&hcan1);
+    HAL_CAN_ActivateNotification(&hcan1, CAN_IT_TX_MAILBOX_EMPTY |
+                                           CAN_IT_RX_FIFO0_MSG_PENDING |
+                                           CAN_IT_RX_FIFO0_FULL |
+                                           CAN_IT_RX_FIFO0_OVERRUN);
+}
 
-    if (HAL_CAN_Start(&hcan1) != HAL_OK) {
-        Error_Handler();
-    }
+void IR_Host_TxMailboxCompleteCallback(CAN_HandleTypeDef *hcan)
+{
+    if (hcan->Instance == CAN1) {
 
-    if (HAL_CAN_ActivateNotification(&hcan1, CAN_IT_TX_MAILBOX_EMPTY |
-                                              CAN_IT_RX_FIFO0_MSG_PENDING |
-                                              CAN_IT_RX_FIFO0_FULL |
-                                              CAN_IT_RX_FIFO0_OVERRUN) != HAL_OK) {
-        Error_Handler();
     }
 }
 
-bool IR_Host_SendCommand(IR_Host_Command_t cmd, uint8_t *data, uint8_t length)
+void IR_Host_Receive_DataFrame_Ocan(uint32_t can_id, uint8_t module_id, uint8_t *data, uint8_t dlc)
+{
+    IR_Host_RxFrame_t rx_frame;
+
+    rx_frame.can_id = can_id;
+    rx_frame.module_id = module_id;
+    rx_frame.dlc = dlc > 8 ? 8 : dlc;
+    memcpy(rx_frame.data, data, rx_frame.dlc);
+    rx_frame.timestamp = HAL_GetTick();
+
+    if (ir_host_context.rx_queue != NULL) {
+        osMessageQueuePut(ir_host_context.rx_queue, &rx_frame, 0, 0);
+    }
+}
+
+void IR_Host_Handle(uint8_t module_id, CAN_HandleTypeDef *hcan, uint32_t id, uint8_t *data, uint8_t dlc)
+{
+    if (id == IR_HOST_CAN_ID_ACK) {
+        if (dlc >= 2 && data[0] == IR_ACK_MAGIC && data[1] == IR_ACK_MAGIC) {
+            IR_Module_Node_t *module = IR_Host_FindModule(module_id);
+            if (module != NULL) {
+                module->status = IR_HOST_STATUS_SUCCESS;
+                module->busy = false;
+            }
+        }
+        return;
+    }
+
+    if (id == IR_HOST_CAN_ID_DATA) {
+        IR_Module_Node_t *module = IR_Host_FindModule(module_id);
+
+        if (dlc >= 2) {
+            uint8_t received_crc = data[dlc - 1];
+            uint8_t calculated_crc = IR_Host_CRC8(data, dlc - 1);
+
+            if (received_crc == calculated_crc) {
+                if (module != NULL) {
+                    module->last_response.module_id = data[0];
+                    module->last_response.status = IR_HOST_STATUS_SUCCESS;
+                    module->last_response.length = dlc - 2;
+                    module->last_response.timestamp = HAL_GetTick();
+                    module->last_response.valid = true;
+                    if (module->last_response.length > 0) {
+                        memcpy(module->last_response.data, &data[1], module->last_response.length);
+                    }
+                    module->last_rx_time = HAL_GetTick();
+                    module->online = true;
+                    module->busy = false;
+                }
+            }
+        }
+    }
+}
+
+void IR_Host_ProcessRxFrame(CAN_RxHeaderTypeDef *rx_header, uint8_t *rx_data)
+{
+    uint8_t module_id = rx_data[0];
+
+    IR_Host_Receive_DataFrame_Ocan(rx_header->StdId, module_id, rx_data, rx_header->DLC);
+    IR_Host_Handle(module_id, &hcan1, rx_header->StdId, rx_data, rx_header->DLC);
+}
+
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+{
+    if (hcan->Instance == CAN1) {
+        uint8_t rx_data[8];
+        CAN_RxHeaderTypeDef rx_header;
+
+        if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rx_header, rx_data) == HAL_OK) {
+            IR_Host_ProcessRxFrame(&rx_header, rx_data);
+        }
+    }
+}
+
+bool IR_Host_SendCommand(uint8_t module_id, IR_Host_Command_t cmd, uint8_t *data, uint8_t length)
 {
     CAN_TxHeaderTypeDef tx_header;
     uint32_t tx_mailbox;
     uint8_t tx_data[8];
     uint8_t crc_len;
 
-    if (length > 5) {
-        return false;
-    }
+    IR_Module_Node_t *module = IR_Host_FindModule(module_id);
+    if (module == NULL) return false;
+    if (module->busy) return false;
+    if (length > 5) return false;
 
-    if (ir_host_context.busy) {
-        return false;
-    }
-
-    uint32_t time_since_last_tx = HAL_GetTick() - ir_host_context.last_tx_time;
-    if (time_since_last_tx < IR_HOST_FRAME_INTERVAL_MS) {
-        return false;
-    }
+    uint32_t time_since_last_tx = HAL_GetTick() - module->last_tx_time;
+    if (time_since_last_tx < IR_HOST_FRAME_INTERVAL_MS) return false;
 
     memset(tx_data, 0, 8);
-    tx_data[0] = IR_HOST_MODULE_ID;
+    tx_data[0] = module_id;
     tx_data[1] = cmd;
     if (data != NULL && length > 0) {
         memcpy(&tx_data[2], data, length);
@@ -110,42 +288,40 @@ bool IR_Host_SendCommand(IR_Host_Command_t cmd, uint8_t *data, uint8_t length)
     tx_header.DLC = crc_len + 1;
     tx_header.TransmitGlobalTime = DISABLE;
 
-    ir_host_context.busy = true;
-    ir_host_context.status = IR_HOST_STATUS_SENDING;
-    tx_complete_flag = false;
+    module->busy = true;
+    module->status = IR_HOST_STATUS_SENDING;
 
     if (HAL_CAN_AddTxMessage(&hcan1, &tx_header, tx_data, &tx_mailbox) != HAL_OK) {
-        ir_host_context.busy = false;
-        ir_host_context.status = IR_HOST_STATUS_ERROR;
+        module->busy = false;
+        module->status = IR_HOST_STATUS_ERROR;
         return false;
     }
 
-    ir_host_context.last_tx_time = HAL_GetTick();
-    ir_host_context.status = IR_HOST_STATUS_WAIT_ACK;
-
+    module->last_tx_time = HAL_GetTick();
+    module->status = IR_HOST_STATUS_WAIT_ACK;
     return true;
 }
 
-bool IR_Host_SendDataWithRetry(uint8_t *data, uint8_t length, uint8_t max_retry)
+bool IR_Host_SendDataWithRetry(uint8_t module_id, uint8_t *data, uint8_t length, uint8_t max_retry)
 {
     CAN_TxHeaderTypeDef tx_header;
     uint32_t tx_mailbox;
     uint8_t tx_data[8];
     uint8_t total_len;
 
-    if (length > 6) {
-        return false;
-    }
+    IR_Module_Node_t *module = IR_Host_FindModule(module_id);
+    if (module == NULL) return false;
+    if (length > 6) return false;
 
     for (uint8_t retry = 0; retry < max_retry; retry++) {
-        while (ir_host_context.busy) {
-            HAL_Delay(1);
+        while (module->busy) {
+            osDelay(10);
         }
 
-        ir_host_context.status = IR_HOST_STATUS_IDLE;
+        module->status = IR_HOST_STATUS_IDLE;
 
         memset(tx_data, 0, 8);
-        tx_data[0] = IR_HOST_MODULE_ID;
+        tx_data[0] = module_id;
         memcpy(&tx_data[1], data, length);
         total_len = length + 1;
         tx_data[total_len] = IR_Host_CRC8(tx_data, total_len);
@@ -158,153 +334,143 @@ bool IR_Host_SendDataWithRetry(uint8_t *data, uint8_t length, uint8_t max_retry)
         tx_header.DLC = total_len;
         tx_header.TransmitGlobalTime = DISABLE;
 
-        ir_host_context.busy = true;
-        ir_host_context.status = IR_HOST_STATUS_SENDING;
-        tx_complete_flag = false;
+        module->busy = true;
+        module->status = IR_HOST_STATUS_SENDING;
 
         if (HAL_CAN_AddTxMessage(&hcan1, &tx_header, tx_data, &tx_mailbox) == HAL_OK) {
-            ir_host_context.last_tx_time = HAL_GetTick();
+            module->last_tx_time = HAL_GetTick();
 
             uint32_t start_time = HAL_GetTick();
             while ((HAL_GetTick() - start_time) < IR_HOST_CAN_TIMEOUT_MS) {
-                if (rx_received_flag) {
-                    rx_received_flag = false;
-                    if (ir_host_context.last_response.status == IR_HOST_STATUS_SUCCESS) {
-                        ir_host_context.busy = false;
+                if (!module->busy) {
+                    if (module->status == IR_HOST_STATUS_SUCCESS) {
                         return true;
-                    } else if (ir_host_context.last_response.status == IR_HOST_STATUS_NACK) {
+                    } else if (module->status == IR_HOST_STATUS_NACK) {
                         break;
                     }
                 }
-                HAL_Delay(10);
+                osDelay(10);
             }
+        } else {
+            module->busy = false;
+            module->status = IR_HOST_STATUS_ERROR;
         }
 
-        ir_host_context.busy = false;
-        ir_host_context.status = IR_HOST_STATUS_TIMEOUT;
-        HAL_Delay(50);
+        osDelay(50);
     }
 
     return false;
 }
 
-IR_Host_Status_t IR_Host_GetStatus(void)
+bool IR_Host_Ping(uint8_t module_id, uint32_t timeout_ms)
 {
-    return ir_host_context.status;
-}
-
-void IR_Host_ProcessRxFrame(CAN_RxHeaderTypeDef *rx_header, uint8_t *rx_data)
-{
-    if (rx_header->StdId == IR_HOST_CAN_ID_ACK) {
-        if (rx_header->DLC >= 2) {
-            if (rx_data[0] == IR_ACK_MAGIC && rx_data[1] == IR_ACK_MAGIC) {
-                ir_host_context.last_response.status = IR_HOST_STATUS_SUCCESS;
-            } else if (rx_data[0] == IR_NACK_MAGIC && rx_data[1] == IR_NACK_MAGIC) {
-                ir_host_context.last_response.status = IR_HOST_STATUS_NACK;
-            }
-            rx_received_flag = true;
-        }
-        return;
+    if (!IR_Host_SendCommand(module_id, IR_HOST_CMD_PING, NULL, 0)) {
+        return false;
     }
 
-    if (rx_header->StdId == IR_HOST_CAN_ID_DATA) {
-        if (rx_header->DLC >= 2) {
-            uint8_t module_id = rx_data[0];
-            uint8_t received_crc = rx_data[rx_header->DLC - 1];
-            uint8_t calculated_crc = IR_Host_CRC8(rx_data, rx_header->DLC - 1);
-
-            if (received_crc == calculated_crc) {
-                ir_host_context.last_response.module_id = module_id;
-                ir_host_context.last_response.status = IR_HOST_STATUS_SUCCESS;
-                ir_host_context.last_response.length = rx_header->DLC - 2;
-                if (ir_host_context.last_response.length > 0) {
-                    memcpy(ir_host_context.last_response.data, &rx_data[1], 
-                           ir_host_context.last_response.length);
-                }
-            } else {
-                ir_host_context.last_response.status = IR_HOST_STATUS_ERROR;
-            }
-            rx_received_flag = true;
-        }
-    }
-}
-
-bool IR_Host_WaitResponse(uint32_t timeout_ms)
-{
     uint32_t start_time = HAL_GetTick();
-
     while ((HAL_GetTick() - start_time) < timeout_ms) {
-        if (rx_received_flag) {
-            rx_received_flag = false;
+        IR_Module_Node_t *module = IR_Host_FindModule(module_id);
+        if (module != NULL && !module->busy && module->status == IR_HOST_STATUS_SUCCESS) {
             return true;
         }
-        HAL_Delay(10);
+        osDelay(10);
     }
 
     return false;
 }
 
-void IR_Host_ClearStatus(void)
+bool IR_Host_ReadStatus(uint8_t module_id, uint8_t *status, uint32_t timeout_ms)
 {
-    ir_host_context.status = IR_HOST_STATUS_IDLE;
-    ir_host_context.busy = false;
-    memset(&ir_host_context.last_response, 0, sizeof(IR_Host_ResponseFrame_t));
-    rx_received_flag = false;
-}
-
-void IR_Host_TxMailboxCompleteCallback(CAN_HandleTypeDef *hcan)
-{
-    if (hcan->Instance == CAN1) {
-        tx_complete_flag = true;
+    if (!IR_Host_SendCommand(module_id, IR_HOST_CMD_READ_STATUS, NULL, 0)) {
+        return false;
     }
+
+    uint32_t start_time = HAL_GetTick();
+    while ((HAL_GetTick() - start_time) < timeout_ms) {
+        IR_Module_Node_t *module = IR_Host_FindModule(module_id);
+        if (module != NULL && !module->busy) {
+            if (status != NULL && module->last_response.length > 0) {
+                *status = module->last_response.data[0];
+            }
+            return true;
+        }
+        osDelay(10);
+    }
+
+    return false;
 }
 
-void IR_Host_RxFifo0Callback(CAN_HandleTypeDef *hcan)
+bool IR_Host_ResetModule(uint8_t module_id, uint32_t timeout_ms)
 {
-    if (hcan->Instance == CAN1) {
-        CAN_RxHeaderTypeDef rx_header;
-        uint8_t rx_data[8];
+    if (!IR_Host_SendCommand(module_id, IR_HOST_CMD_RESET, NULL, 0)) {
+        return false;
+    }
 
-        if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rx_header, rx_data) == HAL_OK) {
-            IR_Host_ProcessRxFrame(&rx_header, rx_data);
+    uint32_t start_time = HAL_GetTick();
+    while ((HAL_GetTick() - start_time) < timeout_ms) {
+        IR_Module_Node_t *module = IR_Host_FindModule(module_id);
+        if (module != NULL && !module->busy) {
+            return true;
+        }
+        osDelay(10);
+    }
+
+    return false;
+}
+
+void IR_Host_Task(void *argument)
+{
+    IR_Host_RxFrame_t rx_frame;
+    (void)argument;
+
+    for (;;) {
+        if (osMessageQueueGet(ir_host_context.rx_queue, &rx_frame, NULL, 100) == osOK) {
+            IR_Module_Node_t *module = IR_Host_FindModule(rx_frame.module_id);
+
+            if (module != NULL) {
+                if (rx_frame.can_id == IR_HOST_CAN_ID_ACK) {
+                    if (rx_frame.dlc >= 2 &&
+                        rx_frame.data[0] == IR_ACK_MAGIC &&
+                        rx_frame.data[1] == IR_ACK_MAGIC) {
+                        module->status = IR_HOST_STATUS_SUCCESS;
+                        module->busy = false;
+                    }
+                }
+                else if (rx_frame.can_id == IR_HOST_CAN_ID_DATA) {
+                    if (rx_frame.dlc >= 2) {
+                        uint8_t received_crc = rx_frame.data[rx_frame.dlc - 1];
+                        uint8_t calculated_crc = IR_Host_CRC8(rx_frame.data, rx_frame.dlc - 1);
+
+                        if (received_crc == calculated_crc) {
+                            module->last_response.module_id = rx_frame.data[0];
+                            module->last_response.status = IR_HOST_STATUS_SUCCESS;
+                            module->last_response.length = rx_frame.dlc - 2;
+                            module->last_response.timestamp = rx_frame.timestamp;
+                            module->last_response.valid = true;
+
+                            if (module->last_response.length > 0) {
+                                memcpy(module->last_response.data,
+                                       &rx_frame.data[1],
+                                       module->last_response.length);
+                            }
+
+                            module->last_rx_time = rx_frame.timestamp;
+                            module->online = true;
+                            module->busy = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        IR_Module_Node_t *current = ir_host_context.module_list.head;
+        while (current != NULL) {
+            if (current->online &&
+                (HAL_GetTick() - current->last_rx_time) > 3000) {
+                current->online = false;
+            }
+            current = current->next;
         }
     }
-}
-
-bool IR_Host_Ping(uint32_t timeout_ms)
-{
-    if (!IR_Host_SendCommand(IR_HOST_CMD_PING, NULL, 0)) {
-        return false;
-    }
-
-    if (IR_Host_WaitResponse(timeout_ms)) {
-        return (ir_host_context.last_response.status == IR_HOST_STATUS_SUCCESS);
-    }
-
-    return false;
-}
-
-bool IR_Host_ReadStatus(uint8_t *status, uint32_t timeout_ms)
-{
-    if (!IR_Host_SendCommand(IR_HOST_CMD_READ_STATUS, NULL, 0)) {
-        return false;
-    }
-
-    if (IR_Host_WaitResponse(timeout_ms)) {
-        if (status != NULL && ir_host_context.last_response.length > 0) {
-            *status = ir_host_context.last_response.data[0];
-        }
-        return true;
-    }
-
-    return false;
-}
-
-bool IR_Host_ResetModule(uint32_t timeout_ms)
-{
-    if (!IR_Host_SendCommand(IR_HOST_CMD_RESET, NULL, 0)) {
-        return false;
-    }
-
-    return IR_Host_WaitResponse(timeout_ms);
 }

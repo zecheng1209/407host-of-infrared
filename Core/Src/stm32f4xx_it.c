@@ -263,9 +263,4 @@ void HAL_CAN_TxMailbox2CompleteCallback(CAN_HandleTypeDef *hcan)
     IR_Host_TxMailboxCompleteCallback(hcan);
 }
 
-void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
-{
-    IR_Host_RxFifo0Callback(hcan);
-}
-
 /* USER CODE END 1 */
