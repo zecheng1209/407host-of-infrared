@@ -163,23 +163,31 @@ void IR_Host_ConfigCanFilter(void)
     can_filter.FilterActivation = ENABLE;
     can_filter.SlaveStartFilterBank = 14;
 
-    HAL_CAN_ConfigFilter(&hcan1, &can_filter);
+    if (HAL_CAN_ConfigFilter(&hcan1, &can_filter) != HAL_OK) {
+        Error_Handler();
+    }
 }
 
 void IR_Host_StartCan(void)
 {
     IR_Host_ConfigCanFilter();
-    HAL_CAN_Start(&hcan1);
-    HAL_CAN_ActivateNotification(&hcan1, CAN_IT_TX_MAILBOX_EMPTY |
-                                           CAN_IT_RX_FIFO0_MSG_PENDING |
-                                           CAN_IT_RX_FIFO0_FULL |
-                                           CAN_IT_RX_FIFO0_OVERRUN);
+
+    if (HAL_CAN_Start(&hcan1) != HAL_OK) {
+        Error_Handler();
+    }
+
+    if (HAL_CAN_ActivateNotification(&hcan1, CAN_IT_TX_MAILBOX_EMPTY |
+                                              CAN_IT_RX_FIFO0_MSG_PENDING |
+                                              CAN_IT_RX_FIFO0_FULL |
+                                              CAN_IT_RX_FIFO0_OVERRUN) != HAL_OK) {
+        Error_Handler();
+    }
 }
 
 void IR_Host_TxMailboxCompleteCallback(CAN_HandleTypeDef *hcan)
 {
     if (hcan->Instance == CAN1) {
-
+        // Transmission complete, can be used for flow control if needed
     }
 }
 
