@@ -1,29 +1,34 @@
-
 # 407host-of-infrared 📡
+
 基于 STM32F407 的红外主控通信主机固件，实现多红外模块的 CAN 总线管理、可靠通信与状态监控。（配合文档中的f103板子控制的的模块使用）
 暂时停止更新，新的红外上位机任务在机械臂任务中重试
+
 ## 📋 目录
+
 - [核心功能](#-核心功能)
 - [项目架构](#-项目架构)
 - [快速上手](#-快速上手)
 - [维护信息](#-维护信息)
 
 ## ✅ 核心功能
-| 功能模块 | 状态 | 核心说明 |
-| :--- | :---: | :--- |
-| 🔧 系统初始化 | ✅ 完成 | 队列、链表、互斥锁正确初始化，首次发送时间预置 |
-| 🧩 链表管理 | ✅ 完成 | Add/Remove 加锁保护，FindModule 低风险无锁 |
-| 📥 CAN 接收 | ✅ 完成 | 中断→ProcessRxFrame→队列+Handle 流程清晰 |
-| 📊 数据入队 | ✅ 完成 | 完整保存 can_id + module_id + data + dlc + timestamp |
-| ✅ ACK 处理 | ✅ 完成 | Handle 用 module_id 查找，Task 用 rx_frame.module_id 匹配 |
-| 📝 DATA 处理 | ✅ 完成 | CRC 校验 → 更新响应 → 设置 online/busy 状态 |
-| 📤 命令发送 | ✅ 完成 | busy 检查 → 帧间隔 → CRC → 发送 → 更新状态 |
-| 🔁 重试机制 | ✅ 完成 | 发送成功等待 ACK，发送失败自动重试 |
-| ⏱️ 超时检测 | ✅ 完成 | Task 循环检测，3 秒无数据标记为 offline |
-| 🔐 CRC 算法 | ✅ 完成 | 与红外模块 CRC8 一致，多项式 0x07 |
+
+| 功能模块       |  状态  | 核心说明                                                  |
+| :--------- | :--: | :---------------------------------------------------- |
+| 🔧 系统初始化   | ✅ 完成 | 队列、链表、互斥锁正确初始化，首次发送时间预置                               |
+| 🧩 链表管理    | ✅ 完成 | Add/Remove 加锁保护，FindModule 低风险无锁                      |
+| 📥 CAN 接收  | ✅ 完成 | 中断→ProcessRxFrame→队列+Handle 流程清晰                      |
+| 📊 数据入队    | ✅ 完成 | 完整保存 can\_id + module\_id + data + dlc + timestamp    |
+| ✅ ACK 处理   | ✅ 完成 | Handle 用 module\_id 查找，Task 用 rx\_frame.module\_id 匹配 |
+| 📝 DATA 处理 | ✅ 完成 | CRC 校验 → 更新响应 → 设置 online/busy 状态                     |
+| 📤 命令发送    | ✅ 完成 | busy 检查 → 帧间隔 → CRC → 发送 → 更新状态                       |
+| 🔁 重试机制    | ✅ 完成 | 发送成功等待 ACK，发送失败自动重试                                   |
+| ⏱️ 超时检测    | ✅ 完成 | Task 循环检测，3 秒无数据标记为 offline                           |
+| 🔐 CRC 算法  | ✅ 完成 | 与红外模块 CRC8 一致，多项式 0x07                                |
 
 ## 🏗️ 项目架构
+
 ### 核心技术栈
+
 - **主控芯片**：STM32F407
 - **通信总线**：CAN 总线
 - **实时系统**：FreeRTOS（任务调度、互斥锁、队列）
@@ -33,12 +38,13 @@
 ### 核心流程
 
 #### 1. CAN 接收链路（中断驱动 + 异步处理）
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ 步骤 1: CAN 硬件中断触发                                         │
 │ └── HAL_CAN_RxFifo0MsgPendingCallback() 响应 FIFO0 消息挂起中断  │
 │     └── 调用 HAL_CAN_GetRxMessage() 读取 CAN 帧                  │
-│         └── 包含: StdId (CAN ID) + rx_data[8] + DLC (数据长度)    │
+│         └── 包含: StdId (CAN ID) + rx_data[8] + DLC (数据长度)   │
 └────────────────────────┬────────────────────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────────────────┐
@@ -60,12 +66,12 @@
 │ └── osMessageQueueGet() 从队列取出帧                              │
 │ └── 根据 can_id 分类型处理:                                       │
 │     │
-│     ├── [CAN ID 0x103] ACK 帧处理:                                │
-│     │   └── 检查 data[0] &amp; data[1] 是否为 0xA5 0xA5               │
+│     ├── [CAN ID 0x103] ACK 帧处理:                               │
+│     │   └── 检查 data[0] &amp; data[1] 是否为 0xA5 0xA5           │
 │     │   └── 查找对应 module 的 IR_Module_Node_t                  │
 │     │   └── 标记: status=SUCCESS, busy=false                     │
 │     │
-│     └── [CAN ID 0x102] DATA 帧处理:                               │
+│     └── [CAN ID 0x102] DATA 帧处理:                              │
 │         └── 提取 received_crc = data[dlc-1]                      │
 │         └── 计算 calculated_crc = IR_Host_CRC8(data, dlc-1)      │
 │         └── CRC 校验通过:                                         │
@@ -77,6 +83,7 @@
 ```
 
 #### 2. 命令发送链路（同步阻塞 + 状态机）
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ IR_Host_SendCommand(module_id, cmd, data, length) 入口           │
@@ -85,7 +92,7 @@
 ┌────────────────────────▼────────────────────────────────────────┐
 │ 前置检查 (任一失败返回 false)                                     │
 │ ├─ 检查模块是否存在 (FindModule != NULL)                         │
-│ ├─ 检查 module-&gt;busy 是否为 false                                │
+│ ├─ 检查 module-&gt;busy 是否为 false                             │
 │ ├─ 检查 length ≤ 5 (帧格式限制)                                  │
 │ └─ 检查帧间隔: (当前时间 - last_tx_time) ≥ 50ms                  │
 └────────────────────────┬────────────────────────────────────────┘
@@ -101,8 +108,8 @@
                          │
 ┌────────────────────────▼────────────────────────────────────────┐
 │ CAN 发送 (StdId=0x101 命令帧)                                     │
-│ └── 标记: module-&gt;busy = true                                    │
-│ └── 标记: module-&gt;status = SENDING                               │
+│ └── 标记: module-&gt;busy = true                                  │
+│ └── 标记: module-&gt;status = SENDING                             │
 │ └── 调用 HAL_CAN_AddTxMessage() 发送到 CAN1                      │
 │ └── 发送成功: 更新 last_tx_time, status=WAIT_ACK, 返回 true      │
 │ └── 发送失败: 恢复 busy=false, status=ERROR, 返回 false          │
@@ -111,7 +118,7 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │ IR_Host_SendDataWithRetry() 增强版 (带重试)                       │
 │ └── 循环 max_retry 次:                                           │
-│     └── 等待 module-&gt;busy 变为 false (轮询 osDelay(10))           │
+│     └── 等待 module-&gt;busy 变为 false (轮询 osDelay(10))        │
 │     └── 发送数据帧 (StdId=0x102)                                 │
 │     └── 等待 ACK 或超时 (500ms):                                 │
 │         └── 收到 ACK (status=SUCCESS): 立即返回 true              │
@@ -123,19 +130,20 @@
 │ 高层 API 示例 (以 PING 为例):                                    │
 │ IR_Host_Ping(module_id, timeout_ms)                             │
 │ └── 调用 SendCommand(IR_HOST_CMD_PING, NULL, 0)                 │
-│ └── 轮询等待: module-&gt;busy==false &amp;&amp; status==SUCCESS             │
+│ └── 轮询等待: module-&gt;busy==false &amp;&amp; status==SUCCESS  │
 │     └── 超时时间内成功: 返回 true                                │
 │     └── 超时: 返回 false                                         │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 #### 3. 状态管理（循环检测 + 互斥保护）
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ 在线状态检测 (IR_Host_Task() 每次循环执行)                        │
 │ └── 遍历 module_list 链表:                                       │
-│     └── 如果 module-&gt;online == true:                            │
-│         └── 检查 (当前时间 - last_rx_time) &gt; 3000ms?            │
+│     └── 如果 module-&gt;online == true:                         │
+│         └── 检查 (当前时间 - last_rx_time) &gt; 3000ms?          │
 │             └── 是: 标记 online = false (超时离线)               │
 └─────────────────────────────────────────────────────────────────┘
 
@@ -147,42 +155,42 @@
 │            ▼                                                     │
 │  SENDING ──┐                                                     │
 │            │ 发送成功                                            │
-│            ▼                                                     │
+│            ▼                                                    │
 │ WAIT_ACK ──┬─ 收到 ACK ───► SUCCESS ──┐                         │
-│            │                           │                         │
-│            ├─ 收到 NACK ───► NACK      │                         │
-│            │                           │                         │
-│            └─ 超时 ───────► TIMEOUT    │                         │
-│                                        │                         │
-│              发送失败 ───────────────► ERROR                      │
-│                                        │                         │
-│           ┌────────────────────────────┘                         │
-│           │ 下次发送前重置                                        │
-│           ▼                                                        │
-│         IDLE                                                      │
+│            │                           │                        │
+│            ├─ 收到 NACK ───► NACK      │                        │
+│            │                           │                        │
+│            └─ 超时 ───────► TIMEOUT    │                        │
+│                                        │                        │
+│              发送失败 ───────────────► ERROR                     │
+│                                        │                        │
+│           ┌────────────────────────────┘                        │
+│           │ 下次发送前重置                                       │
+│           ▼                                                     │
+│         IDLE                                                    │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
-│ 模块管理互斥保护                                                  │
-│ └── AddModule/RemoveModule: 先获取 module_list.mutex             │
+│ 模块管理互斥保护                                                 │
+│ └── AddModule/RemoveModule: 先获取 module_list.mutex            │
 │     └── 操作完成后释放 mutex                                     │
 │ └── FindModule/GetModuleByIndex: 无锁 (仅遍历读取)               │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## 🚀 快速上手
+<br />
+
 ### 环境要求
+
 - 开发环境：Keil MDK 5 / STM32CubeIDE
 - 硬件：STM32F407 开发板、CAN 收发器、红外从机模块
 - 依赖：FreeRTOS 组件、STM32 HAL 库
 
-### 编译与烧录
-1.  克隆项目到本地
-2.  打开工程文件，配置 CAN 波特率、中断优先级
-3.  编译工程，烧录到 STM32F407 开发板
-4.  连接 CAN 总线与红外从机模块，上电运行
+<br />
 
 ## 📌 维护信息
-- 维护者：[Trick Immortal]
+
+- 维护者：\[Trick Immortal]
 - 最后更新：2026-4-8
 - 问题反馈：如有 Bug 或优化建议，欢迎提交 Issue
+
