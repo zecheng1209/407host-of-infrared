@@ -48,11 +48,11 @@
 └────────────────────────┬────────────────────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────────────────┐
-│ 步骤 2: 帧预处理 ProcessRxFrame()                                │
-│ └── 从 rx_data[0] 提取 module_id                                 │
-│ └── 调用 IR_Host_Receive_DataFrame_Ocan()                        │
-│     └── 组装 IR_Host_RxFrame_t 结构体                            │
-│         └── 保存: can_id + module_id + data[8] + dlc + timestamp │
+│ 步骤 2: 帧预处理 ProcessRxFrame()                                
+│ └── 从 rx_data[0] 提取 module_id                                 
+│ └── 调用 IR_Host_Receive_DataFrame_Ocan()                        
+│     └── 组装 IR_Host_RxFrame_t 结构体                            
+│         └── 保存: can_id + module_id + data[8] + dlc + timestamp 
 └────────────────────────┬────────────────────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────────────────┐
