@@ -41,44 +41,44 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ 步骤 1: CAN 硬件中断触发                                        
-│ └── HAL_CAN_RxFifo0MsgPendingCallback() 响应 FIFO0 消息挂起中断  
-│     └── 调用 HAL_CAN_GetRxMessage() 读取 CAN 帧                  
-│         └── 包含: StdId (CAN ID) + rx_data[8] + DLC (数据长度)   
+│ 步骤 1: CAN 硬件中断触发                                         │
+│ └── HAL_CAN_RxFifo0MsgPendingCallback() 响应 FIFO0 消息挂起中断  │
+│     └── 调用 HAL_CAN_GetRxMessage() 读取 CAN 帧                  │
+│         └── 包含: StdId (CAN ID) + rx_data[8] + DLC (数据长度)    │
 └────────────────────────┬────────────────────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────────────────┐
-│ 步骤 2: 帧预处理 ProcessRxFrame()                                
-│ └── 从 rx_data[0] 提取 module_id                                 
-│ └── 调用 IR_Host_Receive_DataFrame_Ocan()                        
-│     └── 组装 IR_Host_RxFrame_t 结构体                            
-│         └── 保存: can_id + module_id + data[8] + dlc + timestamp 
+│ 步骤 2: 帧预处理 ProcessRxFrame()                                │
+│ └── 从 rx_data[0] 提取 module_id                                 │
+│ └── 调用 IR_Host_Receive_DataFrame_Ocan()                        │
+│     └── 组装 IR_Host_RxFrame_t 结构体                            │
+│         └── 保存: can_id + module_id + data[8] + dlc + timestamp │
 └────────────────────────┬────────────────────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────────────────┐
-│ 步骤 3: 消息入队 osMessageQueuePut()                             
-│ └── 将 IR_Host_RxFrame_t 放入接收队列 (队列大小 20)              
-│ └── 同时调用 IR_Host_Handle() 进行初步处理                       
+│ 步骤 3: 消息入队 osMessageQueuePut()                             │
+│ └── 将 IR_Host_RxFrame_t 放入接收队列 (队列大小 20)              │
+│ └── 同时调用 IR_Host_Handle() 进行初步处理                       │
 └────────────────────────┬────────────────────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────────────────┐
-│ 步骤 4: IR_Host_Task() 任务循环处理 (100ms 超时轮询)              
-│ └── osMessageQueueGet() 从队列取出帧                              
-│ └── 根据 can_id 分类型处理:                                       
+│ 步骤 4: IR_Host_Task() 任务循环处理 (100ms 超时轮询)              │
+│ └── osMessageQueueGet() 从队列取出帧                              │
+│ └── 根据 can_id 分类型处理:                                       │
 │     │
-│     ├── [CAN ID 0x103] ACK 帧处理:                               
-│     │   └── 检查 data[0] &amp; data[1] 是否为 0xA5 0xA5           
-│     │   └── 查找对应 module 的 IR_Module_Node_t                  
-│     │   └── 标记: status=SUCCESS, busy=false                     
+│     ├── [CAN ID 0x103] ACK 帧处理:                                │
+│     │   └── 检查 data[0] &amp; data[1] 是否为 0xA5 0xA5               │
+│     │   └── 查找对应 module 的 IR_Module_Node_t                  │
+│     │   └── 标记: status=SUCCESS, busy=false                     │
 │     │
-│     └── [CAN ID 0x102] DATA 帧处理:                              
-│         └── 提取 received_crc = data[dlc-1]                      
-│         └── 计算 calculated_crc = IR_Host_CRC8(data, dlc-1)      
-│         └── CRC 校验通过:                                         
-│             └── 保存响应到 last_response                          
-│                 └── module_id, data[0..dlc-2], timestamp         
-│             └── 更新: last_rx_time = 当前时间                     
-│             └── 标记: online=true, busy=false, valid=true        
+│     └── [CAN ID 0x102] DATA 帧处理:                               │
+│         └── 提取 received_crc = data[dlc-1]                      │
+│         └── 计算 calculated_crc = IR_Host_CRC8(data, dlc-1)      │
+│         └── CRC 校验通过:                                         │
+│             └── 保存响应到 last_response                          │
+│                 └── module_id, data[0..dlc-2], timestamp         │
+│             └── 更新: last_rx_time = 当前时间                     │
+│             └── 标记: online=true, busy=false, valid=true        │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -86,53 +86,53 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ IR_Host_SendCommand(module_id, cmd, data, length) 入口          
+│ IR_Host_SendCommand(module_id, cmd, data, length) 入口           │
 └────────────────────────┬────────────────────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────────────────┐
-│ 前置检查 (任一失败返回 false)                                     
-│ ├─ 检查模块是否存在 (FindModule != NULL)                         
-│ ├─ 检查 module-&gt;busy 是否为 false                             
-│ ├─ 检查 length ≤ 5 (帧格式限制)                                  
-│ └─ 检查帧间隔: (当前时间 - last_tx_time) ≥ 50ms                  
+│ 前置检查 (任一失败返回 false)                                     │
+│ ├─ 检查模块是否存在 (FindModule != NULL)                         │
+│ ├─ 检查 module-&gt;busy 是否为 false                                │
+│ ├─ 检查 length ≤ 5 (帧格式限制)                                  │
+│ └─ 检查帧间隔: (当前时间 - last_tx_time) ≥ 50ms                  │
 └────────────────────────┬────────────────────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────────────────┐
-│ 帧组装与 CRC 计算                                                 
-│ └── tx_data[0] = module_id                                       
-│ └── tx_data[1] = cmd (命令字: 0x01=PING, 0x03=READ_STATUS 等)    
-│ └── tx_data[2..2+length-1] = data (可选)                         
-│ └── crc_len = 2 + length                                         
-│ └── tx_data[crc_len] = IR_Host_CRC8(tx_data[0..crc_len-1])       
+│ 帧组装与 CRC 计算                                                 │
+│ └── tx_data[0] = module_id                                       │
+│ └── tx_data[1] = cmd (命令字: 0x01=PING, 0x03=READ_STATUS 等)    │
+│ └── tx_data[2..2+length-1] = data (可选)                         │
+│ └── crc_len = 2 + length                                         │
+│ └── tx_data[crc_len] = IR_Host_CRC8(tx_data[0..crc_len-1])       │
 └────────────────────────┬────────────────────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────────────────┐
-│ CAN 发送 (StdId=0x101 命令帧)                                    
-│ └── 标记: module-&gt;busy = true                                
-│ └── 标记: module-&gt;status = SENDING                          
-│ └── 调用 HAL_CAN_AddTxMessage() 发送到 CAN1                      
-│ └── 发送成功: 更新 last_tx_time, status=WAIT_ACK, 返回 true      
-│ └── 发送失败: 恢复 busy=false, status=ERROR, 返回 false          
+│ CAN 发送 (StdId=0x101 命令帧)                                     │
+│ └── 标记: module-&gt;busy = true                                    │
+│ └── 标记: module-&gt;status = SENDING                               │
+│ └── 调用 HAL_CAN_AddTxMessage() 发送到 CAN1                      │
+│ └── 发送成功: 更新 last_tx_time, status=WAIT_ACK, 返回 true      │
+│ └── 发送失败: 恢复 busy=false, status=ERROR, 返回 false          │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
-│ IR_Host_SendDataWithRetry() 增强版 (带重试)                      
-│ └── 循环 max_retry 次:                                           
-│     └── 等待 module-&gt;busy 变为 false (轮询 osDelay(10))       
-│     └── 发送数据帧 (StdId=0x102)                                 
-│     └── 等待 ACK 或超时 (500ms):                                 
-│         └── 收到 ACK (status=SUCCESS): 立即返回 true             
-│         └── 收到 NACK: 退出本次循环继续重试                       
-│         └── 超时: 继续重试                                       
+│ IR_Host_SendDataWithRetry() 增强版 (带重试)                       │
+│ └── 循环 max_retry 次:                                           │
+│     └── 等待 module-&gt;busy 变为 false (轮询 osDelay(10))           │
+│     └── 发送数据帧 (StdId=0x102)                                 │
+│     └── 等待 ACK 或超时 (500ms):                                 │
+│         └── 收到 ACK (status=SUCCESS): 立即返回 true              │
+│         └── 收到 NACK: 退出本次循环继续重试                       │
+│         └── 超时: 继续重试                                       │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
-│ 高层 API 示例 (以 PING 为例):                                    
-│ IR_Host_Ping(module_id, timeout_ms)                             
-│ └── 调用 SendCommand(IR_HOST_CMD_PING, NULL, 0)                 
-│ └── 轮询等待: module-&gt;busy==false &amp;&amp; status==SUCCESS  
-│     └── 超时时间内成功: 返回 true                                 
-│     └── 超时: 返回 false                                         
+│ 高层 API 示例 (以 PING 为例):                                    │
+│ IR_Host_Ping(module_id, timeout_ms)                             │
+│ └── 调用 SendCommand(IR_HOST_CMD_PING, NULL, 0)                 │
+│ └── 轮询等待: module-&gt;busy==false &amp;&amp; status==SUCCESS             │
+│     └── 超时时间内成功: 返回 true                                │
+│     └── 超时: 返回 false                                         │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -140,41 +140,41 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ 在线状态检测 (IR_Host_Task() 每次循环执行)                        
-│ └── 遍历 module_list 链表:                                       
-│     └── 如果 module-&gt;online == true:                         
-│         └── 检查 (当前时间 - last_rx_time) &gt; 3000ms?          
-│             └── 是: 标记 online = false (超时离线)               
+│ 在线状态检测 (IR_Host_Task() 每次循环执行)                        │
+│ └── 遍历 module_list 链表:                                       │
+│     └── 如果 module-&gt;online == true:                            │
+│         └── 检查 (当前时间 - last_rx_time) &gt; 3000ms?            │
+│             └── 是: 标记 online = false (超时离线)               │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
-│ 状态机流转 IR_Host_Status_t                                      
-│                                                                 
-│    IDLE ──┐                                                     
-│            │ SendCommand()                                       
-│            ▼                                                     
-│  SENDING ──┐                                                     
-│            │ 发送成功
-                                            
-│ WAIT_ACK ──┬─ 收到 ACK ───► SUCCESS ──┐                         
-│            │                           │                        
-│            ├─ 收到 NACK ───► NACK      │                        
-│            │                           │                        
-│            └─ 超时 ───────► TIMEOUT    │                        
-│                                        │                        
-│              发送失败 ───────────────► ERROR                     
-│                                        │                       
-│           ┌────────────────────────────┘                        
-│           │ 下次发送前重置                                       
-│           ▼                                                     
-│         IDLE                                                    
+│ 状态机流转 IR_Host_Status_t                                      │
+│                                                                 │
+│    IDLE ──┐                                                     │
+│            │ SendCommand()                                       │
+│            ▼                                                     │
+│  SENDING ──┐                                                     │
+│            │ 发送成功                                            │
+│            ▼                                                     │
+│ WAIT_ACK ──┬─ 收到 ACK ───► SUCCESS ──┐                         │
+│            │                           │                         │
+│            ├─ 收到 NACK ───► NACK      │                         │
+│            │                           │                         │
+│            └─ 超时 ───────► TIMEOUT    │                         │
+│                                        │                         │
+│              发送失败 ───────────────► ERROR                      │
+│                                        │                         │
+│           ┌────────────────────────────┘                         │
+│           │ 下次发送前重置                                        │
+│           ▼                                                        │
+│         IDLE                                                      │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
-│ 模块管理互斥保护                                                 
-│ └── AddModule/RemoveModule: 先获取 module_list.mutex            
-│     └── 操作完成后释放 mutex                                     
-│ └── FindModule/GetModuleByIndex: 无锁 (仅遍历读取)               
+│ 模块管理互斥保护                                                  │
+│ └── AddModule/RemoveModule: 先获取 module_list.mutex             │
+│     └── 操作完成后释放 mutex                                     │
+│ └── FindModule/GetModuleByIndex: 无锁 (仅遍历读取)               │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
